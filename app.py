@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from serial import SerialException
 import threading
+import queue
 
 # ================================================================
 # PAGE CONFIG
@@ -26,24 +27,15 @@ st.set_page_config(
 # ================================================================
 st.markdown("""
 <style>
-    /* MAIN BACKGROUND */
-    .stApp {
-        background-color: #0d0d0d;
-    }
+    .stApp { background-color: #0d0d0d; }
+    .stMarkdown, .stText, .stTitle, .stCaption, .stSubheader { color: #e6e6e6 !important; }
     
-    /* TEXT COLOR */
-    .stMarkdown, .stText, .stTitle, .stCaption, .stSubheader {
-        color: #e6e6e6 !important;
-    }
-    
-    /* METRIC CARDS */
     [data-testid="metric-container"] {
         background-color: #1a1a1a !important;
         border: 1px solid #e65c00 !important;
         border-radius: 8px !important;
         padding: 15px !important;
     }
-    
     [data-testid="metric-container"] label {
         color: #e65c00 !important;
         font-weight: bold !important;
@@ -51,13 +43,11 @@ st.markdown("""
         font-size: 12px !important;
         letter-spacing: 1px !important;
     }
-    
     [data-testid="metric-container"] [data-testid="metric-value"] {
         color: #ffffff !important;
         font-size: 28px !important;
     }
     
-    /* BUTTONS */
     .stButton button {
         background-color: #e65c00 !important;
         color: #000000 !important;
@@ -70,62 +60,28 @@ st.markdown("""
         letter-spacing: 1px !important;
         font-size: 13px !important;
     }
-    
     .stButton button:hover {
         background-color: #ff751a !important;
         color: #000000 !important;
     }
     
-    /* INPUT FIELDS */
     .stNumberInput input, .stTextInput input {
         background-color: #1a1a1a !important;
         border: 1px solid #333333 !important;
         border-radius: 4px !important;
         color: #ffffff !important;
     }
-    
     .stNumberInput input:focus, .stTextInput input:focus {
         border-color: #e65c00 !important;
         box-shadow: 0 0 0 1px #e65c00 !important;
     }
     
-    /* SIDEBAR */
     [data-testid="stSidebar"] {
         background-color: #0d0d0d !important;
         border-right: 1px solid #1a1a1a !important;
     }
-    
-    [data-testid="stSidebar"] .stMarkdown {
-        color: #e6e6e6 !important;
-    }
-    
-    /* DIVIDER */
-    hr {
-        border-color: #e65c00 !important;
-        opacity: 0.3 !important;
-    }
-    
-    /* INFO BOX */
-    .stAlert {
-        background-color: #1a1a1a !important;
-        border-left: 3px solid #e65c00 !important;
-    }
-    
-    /* TABLES */
-    .dataframe {
-        background-color: #1a1a1a !important;
-        color: #e6e6e6 !important;
-    }
-    
-    .dataframe th {
-        background-color: #e65c00 !important;
-        color: #000000 !important;
-    }
-    
-    /* CONTAINER BORDER */
-    .element-container {
-        border-color: #333333 !important;
-    }
+    hr { border-color: #e65c00 !important; opacity: 0.3 !important; }
+    .stAlert { background-color: #1a1a1a !important; border-left: 3px solid #e65c00 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,27 +90,11 @@ st.markdown("""
 # ================================================================
 st.markdown(
     """
-    <div style="
-        border-bottom: 2px solid #e65c00;
-        padding-bottom: 10px;
-        margin-bottom: 30px;
-    ">
-        <h1 style="
-            color: #ffffff;
-            font-weight: 300;
-            letter-spacing: 2px;
-            margin: 0;
-            font-size: 32px;
-        ">
+    <div style="border-bottom: 2px solid #e65c00; padding-bottom: 10px; margin-bottom: 30px;">
+        <h1 style="color: #ffffff; font-weight: 300; letter-spacing: 2px; margin: 0; font-size: 32px;">
             WATER LEVEL CONTROL
         </h1>
-        <p style="
-            color: #e65c00;
-            font-size: 14px;
-            letter-spacing: 4px;
-            margin: 0;
-            text-transform: uppercase;
-        ">
+        <p style="color: #e65c00; font-size: 14px; letter-spacing: 4px; margin: 0; text-transform: uppercase;">
             real-time monitoring & pid tuning
         </p>
     </div>
@@ -167,6 +107,7 @@ st.markdown(
 # ================================================================
 if 'ser' not in st.session_state:
     st.session_state.ser = None
+    st.session_state.connected = False
     
 if 'data' not in st.session_state:
     st.session_state.data = {
@@ -184,8 +125,16 @@ if 'pid_params' not in st.session_state:
         'setpoint': 7.0
     }
     
-if 'running' not in st.session_state:
-    st.session_state.running = False
+if 'history' not in st.session_state:
+    st.session_state.history = {
+        'time': [],
+        'water_level': [],
+        'flow_in': [],
+        'flow_out': []
+    }
+
+if 'stop_thread' not in st.session_state:
+    st.session_state.stop_thread = False
 
 # ================================================================
 # FUNCTIONS
@@ -228,14 +177,7 @@ def read_data(ser):
 with st.sidebar:
     st.markdown(
         """
-        <h3 style="
-            color: #e65c00;
-            font-weight: 300;
-            letter-spacing: 2px;
-            margin-top: 0;
-            text-transform: uppercase;
-            font-size: 14px;
-        ">
+        <h3 style="color: #e65c00; font-weight: 300; letter-spacing: 2px; margin-top: 0; text-transform: uppercase; font-size: 14px;">
             connection
         </h3>
         """,
@@ -248,33 +190,30 @@ with st.sidebar:
         label_visibility="collapsed"
     )
     
-    if st.button("connect", use_container_width=True):
-        st.session_state.ser = init_serial(port)
-        if st.session_state.ser:
-            st.success("connected")
-            st.session_state.running = True
-        else:
-            st.error("connection failed")
+    col_connect, col_disconnect = st.columns(2)
+    with col_connect:
+        if st.button("connect", use_container_width=True):
+            st.session_state.ser = init_serial(port)
+            if st.session_state.ser:
+                st.session_state.connected = True
+                st.success("connected")
+            else:
+                st.session_state.connected = False
+                st.error("connection failed")
     
-    if st.button("disconnect", use_container_width=True):
-        if st.session_state.ser:
-            st.session_state.ser.close()
-            st.session_state.ser = None
-            st.session_state.running = False
-        st.info("disconnected")
+    with col_disconnect:
+        if st.button("disconnect", use_container_width=True):
+            if st.session_state.ser:
+                st.session_state.ser.close()
+                st.session_state.ser = None
+                st.session_state.connected = False
+            st.info("disconnected")
     
     st.divider()
     
     st.markdown(
         """
-        <h3 style="
-            color: #e65c00;
-            font-weight: 300;
-            letter-spacing: 2px;
-            margin-top: 0;
-            text-transform: uppercase;
-            font-size: 14px;
-        ">
+        <h3 style="color: #e65c00; font-weight: 300; letter-spacing: 2px; margin-top: 0; text-transform: uppercase; font-size: 14px;">
             pid tuning
         </h3>
         """,
@@ -319,7 +258,7 @@ with st.sidebar:
         st.session_state.pid_params['ff'] = new_ff
         st.session_state.pid_params['setpoint'] = new_setpoint
         
-        if st.session_state.ser:
+        if st.session_state.ser and st.session_state.connected:
             cmd = f"P{new_kp},I{new_ki},F{new_ff},S{new_setpoint}"
             if send_command(st.session_state.ser, cmd):
                 st.success("parameters sent")
@@ -331,7 +270,7 @@ with st.sidebar:
 # ================================================================
 # MAIN CONTENT
 # ================================================================
-if st.session_state.running and st.session_state.ser:
+if st.session_state.connected and st.session_state.ser:
     # METRICS
     col1, col2, col3, col4 = st.columns(4)
     
@@ -360,18 +299,7 @@ if st.session_state.running and st.session_state.ser:
             f"{st.session_state.data['pump']}"
         )
     
-    # CHARTS
-    st.divider()
-    
-    if 'history' not in st.session_state:
-        st.session_state.history = {
-            'time': [],
-            'water_level': [],
-            'flow_in': [],
-            'flow_out': []
-        }
-    
-    # READ DATA LOOP
+    # READ DATA (không dùng vòng lặp vô hạn)
     data = read_data(st.session_state.ser)
     if data:
         st.session_state.data = data
@@ -388,6 +316,8 @@ if st.session_state.running and st.session_state.ser:
                 st.session_state.history[key] = st.session_state.history[key][-100:]
     
     # PLOT
+    st.divider()
+    
     if len(st.session_state.history['time']) > 1:
         df = pd.DataFrame({
             'time': st.session_state.history['time'],
@@ -418,27 +348,16 @@ if st.session_state.running and st.session_state.ser:
             paper_bgcolor='#0d0d0d',
             plot_bgcolor='#0d0d0d',
             font=dict(color='#e6e6e6'),
-            xaxis=dict(
-                showgrid=True,
-                gridcolor='#1a1a1a',
-                title='time (s)'
-            ),
-            yaxis=dict(
-                showgrid=True,
-                gridcolor='#1a1a1a',
-                title='cm'
-            ),
-            legend=dict(
-                font=dict(color='#e6e6e6'),
-                bgcolor='rgba(13,13,13,0.8)'
-            ),
+            xaxis=dict(showgrid=True, gridcolor='#1a1a1a', title='time (s)'),
+            yaxis=dict(showgrid=True, gridcolor='#1a1a1a', title='cm'),
+            legend=dict(font=dict(color='#e6e6e6'), bgcolor='rgba(13,13,13,0.8)'),
             height=300,
             margin=dict(l=0, r=0, t=10, b=30)
         )
         
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
     
-    # AUTO REFRESH
+    # AUTO REFRESH - dùng st.rerun() an toàn
     time.sleep(0.1)
     st.rerun()
 
