@@ -144,11 +144,13 @@ if 'history' not in st.session_state:
 if 'last_update' not in st.session_state:
     st.session_state.last_update = 0
 
+if 'auto_refresh' not in st.session_state:
+    st.session_state.auto_refresh = True
+
 # ================================================================
 # FUNCTIONS
 # ================================================================
 def connect_serial(port, baudrate=9600):
-    """Kết nối Serial với timeout và xử lý lỗi"""
     try:
         ser = serial.Serial(
             port=port,
@@ -160,15 +162,11 @@ def connect_serial(port, baudrate=9600):
         ser.reset_input_buffer()
         ser.reset_output_buffer()
         return ser
-    except SerialException as e:
-        st.error(f"Loi ket noi: {e}")
-        return None
     except Exception as e:
-        st.error(f"Loi khac: {e}")
+        st.error(f"Loi ket noi: {e}")
         return None
 
 def disconnect_serial(ser):
-    """Ngắt kết nối Serial an toàn"""
     if ser and ser.is_open:
         try:
             ser.close()
@@ -177,20 +175,16 @@ def disconnect_serial(ser):
     return None
 
 def send_command(ser, command):
-    """Gửi lệnh xuống Arduino"""
     if not ser or not ser.is_open:
         return False
     try:
         ser.write(f"{command}\n".encode())
         ser.flush()
         return True
-    except SerialTimeoutException:
-        return False
     except:
         return False
 
 def read_data(ser):
-    """Đọc dữ liệu từ Arduino"""
     if not ser or not ser.is_open:
         return None
     try:
@@ -210,7 +204,7 @@ def read_data(ser):
     return None
 
 # ================================================================
-# SIDEBAR - CONNECTION & PID
+# SIDEBAR
 # ================================================================
 with st.sidebar:
     st.markdown(
@@ -225,8 +219,7 @@ with st.sidebar:
     port = st.text_input(
         "port",
         value=st.session_state.port,
-        label_visibility="collapsed",
-        help="Vi du: COM3, /dev/ttyUSB0, /dev/cu.usbmodem1101"
+        label_visibility="collapsed"
     )
     
     col1, col2 = st.columns(2)
@@ -317,14 +310,12 @@ if st.session_state.connected and st.session_state.ser:
     if data:
         st.session_state.data = data
         
-        # Update history
         current_time = time.time()
         st.session_state.history['time'].append(current_time)
         st.session_state.history['water_level'].append(data['water_level'])
         st.session_state.history['flow_in'].append(data['flow_in'])
         st.session_state.history['flow_out'].append(data['flow_out'])
         
-        # Keep last 100 points
         if len(st.session_state.history['time']) > 100:
             for key in st.session_state.history:
                 st.session_state.history[key] = st.session_state.history[key][-100:]
@@ -364,21 +355,21 @@ if st.session_state.connected and st.session_state.ser:
     if len(st.session_state.history['time']) > 0:
         df = pd.DataFrame({
             'Time': st.session_state.history['time'],
-            'Water Level (cm)': st.session_state.history['water_level'],
-            'Flow In (L/m)': st.session_state.history['flow_in'],
-            'Flow Out (L/m)': st.session_state.history['flow_out']
+            'Water Level': st.session_state.history['water_level'],
+            'Flow In': st.session_state.history['flow_in'],
+            'Flow Out': st.session_state.history['flow_out']
         })
         st.dataframe(df, use_container_width=True, height=200)
     
     # --- STATUS ---
     st.divider()
-    status_col1, status_col2 = st.columns(2)
-    with status_col1:
+    col_status1, col_status2 = st.columns(2)
+    with col_status1:
         st.caption(f"Last update: {time.strftime('%H:%M:%S', time.localtime(st.session_state.last_update))}")
-    with status_col2:
+    with col_status2:
         st.caption(f"Data points: {len(st.session_state.history['time'])}")
     
-    # --- AUTO REFRESH ---
+    # --- AUTO REFRESH (CHỈ GỌI 1 LẦN) ---
     time.sleep(0.1)
     st.rerun()
 
