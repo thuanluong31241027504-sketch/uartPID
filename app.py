@@ -7,10 +7,7 @@ import streamlit as st
 import serial
 import time
 import pandas as pd
-import plotly.graph_objects as go
 from serial import SerialException
-import threading
-import queue
 
 # ================================================================
 # PAGE CONFIG
@@ -82,6 +79,15 @@ st.markdown("""
     }
     hr { border-color: #e65c00 !important; opacity: 0.3 !important; }
     .stAlert { background-color: #1a1a1a !important; border-left: 3px solid #e65c00 !important; }
+    
+    .dataframe {
+        background-color: #1a1a1a !important;
+        color: #e6e6e6 !important;
+    }
+    .dataframe th {
+        background-color: #e65c00 !important;
+        color: #000000 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -133,9 +139,6 @@ if 'history' not in st.session_state:
         'flow_out': []
     }
 
-if 'stop_thread' not in st.session_state:
-    st.session_state.stop_thread = False
-
 # ================================================================
 # FUNCTIONS
 # ================================================================
@@ -172,7 +175,7 @@ def read_data(ser):
     return None
 
 # ================================================================
-# SIDEBAR - CONNECTION & PID
+# SIDEBAR
 # ================================================================
 with st.sidebar:
     st.markdown(
@@ -190,8 +193,8 @@ with st.sidebar:
         label_visibility="collapsed"
     )
     
-    col_connect, col_disconnect = st.columns(2)
-    with col_connect:
+    col1, col2 = st.columns(2)
+    with col1:
         if st.button("connect", use_container_width=True):
             st.session_state.ser = init_serial(port)
             if st.session_state.ser:
@@ -201,7 +204,7 @@ with st.sidebar:
                 st.session_state.connected = False
                 st.error("connection failed")
     
-    with col_disconnect:
+    with col2:
         if st.button("disconnect", use_container_width=True):
             if st.session_state.ser:
                 st.session_state.ser.close()
@@ -271,6 +274,21 @@ with st.sidebar:
 # MAIN CONTENT
 # ================================================================
 if st.session_state.connected and st.session_state.ser:
+    # READ DATA
+    data = read_data(st.session_state.ser)
+    if data:
+        st.session_state.data = data
+        
+        # Update history
+        st.session_state.history['time'].append(time.time())
+        st.session_state.history['water_level'].append(data['water_level'])
+        st.session_state.history['flow_in'].append(data['flow_in'])
+        st.session_state.history['flow_out'].append(data['flow_out'])
+        
+        if len(st.session_state.history['time']) > 50:
+            for key in st.session_state.history:
+                st.session_state.history[key] = st.session_state.history[key][-50:]
+    
     # METRICS
     col1, col2, col3, col4 = st.columns(4)
     
@@ -299,66 +317,19 @@ if st.session_state.connected and st.session_state.ser:
             f"{st.session_state.data['pump']}"
         )
     
-    # READ DATA (không dùng vòng lặp vô hạn)
-    data = read_data(st.session_state.ser)
-    if data:
-        st.session_state.data = data
-        
-        # Update history
-        st.session_state.history['time'].append(time.time())
-        st.session_state.history['water_level'].append(data['water_level'])
-        st.session_state.history['flow_in'].append(data['flow_in'])
-        st.session_state.history['flow_out'].append(data['flow_out'])
-        
-        # Keep last 100 points
-        if len(st.session_state.history['time']) > 100:
-            for key in st.session_state.history:
-                st.session_state.history[key] = st.session_state.history[key][-100:]
-    
-    # PLOT
+    # HISTORY TABLE
     st.divider()
-    
-    if len(st.session_state.history['time']) > 1:
+    if len(st.session_state.history['time']) > 0:
         df = pd.DataFrame({
             'time': st.session_state.history['time'],
             'water_level': st.session_state.history['water_level'],
             'flow_in': st.session_state.history['flow_in'],
             'flow_out': st.session_state.history['flow_out']
         })
-        
-        fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(
-            x=df['time'],
-            y=df['water_level'],
-            mode='lines',
-            name='Water Level',
-            line=dict(color='#e65c00', width=2)
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=df['time'],
-            y=[st.session_state.pid_params['setpoint']] * len(df),
-            mode='lines',
-            name='Setpoint',
-            line=dict(color='#ffffff', width=1, dash='dash')
-        ))
-        
-        fig.update_layout(
-            paper_bgcolor='#0d0d0d',
-            plot_bgcolor='#0d0d0d',
-            font=dict(color='#e6e6e6'),
-            xaxis=dict(showgrid=True, gridcolor='#1a1a1a', title='time (s)'),
-            yaxis=dict(showgrid=True, gridcolor='#1a1a1a', title='cm'),
-            legend=dict(font=dict(color='#e6e6e6'), bgcolor='rgba(13,13,13,0.8)'),
-            height=300,
-            margin=dict(l=0, r=0, t=10, b=30)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        st.dataframe(df, use_container_width=True, height=200)
     
-    # AUTO REFRESH - dùng st.rerun() an toàn
-    time.sleep(0.1)
+    # AUTO REFRESH
+    time.sleep(0.2)
     st.rerun()
 
 else:
