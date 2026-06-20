@@ -1,13 +1,14 @@
 # ================================================================
 # WATER LEVEL CONTROL APP
 # Minimal Style - Black & Orange
+# Chạy local - Kết nối Serial với Arduino
 # ================================================================
 
 import streamlit as st
 import serial
 import time
 import pandas as pd
-from serial import SerialException
+from serial import SerialException, SerialTimeoutException
 
 # ================================================================
 # PAGE CONFIG
@@ -114,6 +115,7 @@ st.markdown(
 if 'ser' not in st.session_state:
     st.session_state.ser = None
     st.session_state.connected = False
+    st.session_state.port = "/dev/cu.usbmodem1101"
     
 if 'data' not in st.session_state:
     st.session_state.data = {
@@ -139,27 +141,60 @@ if 'history' not in st.session_state:
         'flow_out': []
     }
 
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = 0
+
 # ================================================================
 # FUNCTIONS
 # ================================================================
-def init_serial(port, baudrate=9600):
+def connect_serial(port, baudrate=9600):
+    """Kết nối Serial với timeout và xử lý lỗi"""
     try:
-        ser = serial.Serial(port, baudrate, timeout=1)
+        ser = serial.Serial(
+            port=port,
+            baudrate=baudrate,
+            timeout=0.5,
+            write_timeout=0.5
+        )
         time.sleep(2)
         ser.reset_input_buffer()
+        ser.reset_output_buffer()
         return ser
-    except SerialException:
+    except SerialException as e:
+        st.error(f"Loi ket noi: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Loi khac: {e}")
         return None
 
-def send_command(ser, command):
+def disconnect_serial(ser):
+    """Ngắt kết nối Serial an toàn"""
     if ser and ser.is_open:
+        try:
+            ser.close()
+        except:
+            pass
+    return None
+
+def send_command(ser, command):
+    """Gửi lệnh xuống Arduino"""
+    if not ser or not ser.is_open:
+        return False
+    try:
         ser.write(f"{command}\n".encode())
+        ser.flush()
         return True
-    return False
+    except SerialTimeoutException:
+        return False
+    except:
+        return False
 
 def read_data(ser):
+    """Đọc dữ liệu từ Arduino"""
+    if not ser or not ser.is_open:
+        return None
     try:
-        if ser and ser.in_waiting:
+        if ser.in_waiting > 0:
             line = ser.readline().decode().strip()
             if line:
                 values = line.split(',')
@@ -175,7 +210,7 @@ def read_data(ser):
     return None
 
 # ================================================================
-# SIDEBAR
+# SIDEBAR - CONNECTION & PID
 # ================================================================
 with st.sidebar:
     st.markdown(
@@ -189,15 +224,18 @@ with st.sidebar:
     
     port = st.text_input(
         "port",
-        value="/dev/cu.usbmodem1101",
-        label_visibility="collapsed"
+        value=st.session_state.port,
+        label_visibility="collapsed",
+        help="Vi du: COM3, /dev/ttyUSB0, /dev/cu.usbmodem1101"
     )
     
     col1, col2 = st.columns(2)
     with col1:
         if st.button("connect", use_container_width=True):
-            st.session_state.ser = init_serial(port)
-            if st.session_state.ser:
+            st.session_state.port = port
+            ser = connect_serial(port)
+            if ser:
+                st.session_state.ser = ser
                 st.session_state.connected = True
                 st.success("connected")
             else:
@@ -207,9 +245,8 @@ with st.sidebar:
     with col2:
         if st.button("disconnect", use_container_width=True):
             if st.session_state.ser:
-                st.session_state.ser.close()
-                st.session_state.ser = None
-                st.session_state.connected = False
+                st.session_state.ser = disconnect_serial(st.session_state.ser)
+            st.session_state.connected = False
             st.info("disconnected")
     
     st.divider()
@@ -274,22 +311,27 @@ with st.sidebar:
 # MAIN CONTENT
 # ================================================================
 if st.session_state.connected and st.session_state.ser:
-    # READ DATA
+    
+    # --- READ DATA ---
     data = read_data(st.session_state.ser)
     if data:
         st.session_state.data = data
         
         # Update history
-        st.session_state.history['time'].append(time.time())
+        current_time = time.time()
+        st.session_state.history['time'].append(current_time)
         st.session_state.history['water_level'].append(data['water_level'])
         st.session_state.history['flow_in'].append(data['flow_in'])
         st.session_state.history['flow_out'].append(data['flow_out'])
         
-        if len(st.session_state.history['time']) > 50:
+        # Keep last 100 points
+        if len(st.session_state.history['time']) > 100:
             for key in st.session_state.history:
-                st.session_state.history[key] = st.session_state.history[key][-50:]
+                st.session_state.history[key] = st.session_state.history[key][-100:]
+        
+        st.session_state.last_update = current_time
     
-    # METRICS
+    # --- METRICS ---
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -317,19 +359,27 @@ if st.session_state.connected and st.session_state.ser:
             f"{st.session_state.data['pump']}"
         )
     
-    # HISTORY TABLE
+    # --- HISTORY TABLE ---
     st.divider()
     if len(st.session_state.history['time']) > 0:
         df = pd.DataFrame({
-            'time': st.session_state.history['time'],
-            'water_level': st.session_state.history['water_level'],
-            'flow_in': st.session_state.history['flow_in'],
-            'flow_out': st.session_state.history['flow_out']
+            'Time': st.session_state.history['time'],
+            'Water Level (cm)': st.session_state.history['water_level'],
+            'Flow In (L/m)': st.session_state.history['flow_in'],
+            'Flow Out (L/m)': st.session_state.history['flow_out']
         })
         st.dataframe(df, use_container_width=True, height=200)
     
-    # AUTO REFRESH
-    time.sleep(0.2)
+    # --- STATUS ---
+    st.divider()
+    status_col1, status_col2 = st.columns(2)
+    with status_col1:
+        st.caption(f"Last update: {time.strftime('%H:%M:%S', time.localtime(st.session_state.last_update))}")
+    with status_col2:
+        st.caption(f"Data points: {len(st.session_state.history['time'])}")
+    
+    # --- AUTO REFRESH ---
+    time.sleep(0.1)
     st.rerun()
 
 else:
